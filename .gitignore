@@ -1,0 +1,29 @@
+# 本地目录
+others/
+.trae/
+__pycache__/
+
+# Python
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+build/
+dist/
+
+# 运行时生成文件 (首次截图会自动标定并重新生成)
+settings/calibration.json
+templates/
+debug.log
+*.log
+
+# 用户本地配置
+settings/engine_settings.json
+
+# 编辑器 / 系统
+.idea/
+.vscode/
+Thumbs.db
+Desktop.ini
+.DS_Store
