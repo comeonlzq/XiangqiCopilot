@@ -81,7 +81,7 @@ pip install opencv-python numpy pillow
 
 **第 1 步** — 在天天象棋中进入一个**开局局面**（双方 32 枚棋子全部就位，如下图）：
 
-![标定示例棋盘](pic/calibration_board.png)
+<img src="pic/calibration_board.png" width="320" alt="标定示例棋盘"/>
 
 **第 2 步** — 运行程序：
 
@@ -93,7 +93,7 @@ python auto_play.py
 
 **第 4 步** — 程序自动完成标定与识别，显示带棋子标签的标注图与识别结果：
 
-![完成标定](pic/calibration_ui.png)
+<img src="pic/calibration_ui.png" width="320" alt="完成标定"/>
 
 **第 5 步** — 确认标注图中的棋子识别无误后，点击 **【应用】** 保存。标定结果保存在 `settings/calibration.json` 与 `templates/` 中，之后无需重复标定。
 
