@@ -10,9 +10,11 @@ import subprocess
 class UciEngine:
     """皮卡鱼等标准 UCI 引擎的最小封装"""
 
-    def __init__(self, path, threads=4, hash_mb=256):
+    def __init__(self, path, threads=4, hash_mb=256, log=None):
+        """log: 可选回调, 收到引擎每行输出/每条发送的命令时调用"""
         if not os.path.isfile(path):
             raise FileNotFoundError(f"未找到引擎: {path}")
+        self.log = log
         self.p = subprocess.Popen(
             [path], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT, text=True, encoding="utf-8",
@@ -25,11 +27,15 @@ class UciEngine:
         self._wait("readyok")
 
     def _send(self, cmd):
+        if self.log:
+            self.log(f"> {cmd}")
         self.p.stdin.write(cmd + "\n")
         self.p.stdin.flush()
 
     def _wait(self, token):
         for line in self.p.stdout:
+            if self.log:
+                self.log(line.rstrip())
             if token in line:
                 return
 
@@ -47,6 +53,8 @@ class UciEngine:
             line = self.p.stdout.readline()
             if not line:  # 引擎退出/异常
                 return None, None, None
+            if self.log:
+                self.log(line.rstrip())
             if "score cp" in line:
                 m = re.search(r"score cp (-?\d+)", line)
                 if m:

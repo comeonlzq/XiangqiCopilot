@@ -6,6 +6,7 @@ import json
 import math
 import os
 import random
+import re
 import shutil
 import threading
 import time
@@ -61,6 +62,7 @@ SUB = "#9aa1ab"       # 次要文字
 FAINT = "#b6bcc4"     # 弱文字
 ACCENT = "#d93a2b"    # 强调红(建议/主按钮)
 GREEN = "#34a467"     # 引擎就绪圆点
+AMBER = "#e6a23c"     # 引擎思考中圆点
 ACCENT_HOVER = "#c33124"   # 主按钮悬停
 FIELD_HOVER = "#e3e6ea"    # 次级按钮悬停
 ICON_HOVER = "#e9ebef"     # 图标按钮悬停
@@ -308,6 +310,9 @@ class Assistant:
         self.lost_black = []      # 黑方被吃棋子字符列表
         self.score_hist = []      # 引擎评分历史(供曲线图)
         self.engine = None
+        self._log_count = 0       # 引擎日志累计行数(标题计数用)
+        self.log_translate = True  # 引擎日志转译为中文(可在设置中关闭)
+        self._log_ctx = None      # 思考中的局面上下文, 供日志转译着法用
         self.busy = False
         self.border = None
         self.markers = None
@@ -366,6 +371,118 @@ class Assistant:
     def set_status(self, s):
         self.post(lambda: self.status_var.set(s))
 
+    def set_engine_dot(self, text, color):
+        """更新标题栏引擎状态胶囊(可从工作线程调用)"""
+        self.post(lambda: self.engine_dot.config(text=text, fg=color))
+
+    def append_log(self, line):
+        """引擎日志回显(可从工作线程调用), 展示在「引擎日志」折叠卡片中"""
+        self.post(lambda: self._append_log_ui(line))
+
+    def _append_log_ui(self, line):
+        t = getattr(self, "log_text", None)
+        if t is None or not t.winfo_exists():
+            return
+        if self._log_count == 0:  # 首条日志到达, 清掉占位提示
+            t.delete("1.0", "end")
+        self._log_count += 1
+        self.log_title_var.set(f"引擎日志 ({self._log_count})")
+        at_bottom = t.yview()[1] >= 0.999  # 用户未上翻才自动滚到底
+        t.configure(state="normal")
+        t.insert("end", line + "\n")
+        excess = int(t.index("end-1c").split(".")[0]) - 300
+        if excess > 0:  # 只保留最近 300 行
+            t.delete("1.0", f"{excess}.0")
+        t.configure(state="disabled")
+        if at_bottom:
+            t.see("end")
+
+    def on_engine_line(self, line):
+        """引擎输出回调: 按设置转译为中文, 或原样展示(可从工作线程调用)"""
+        if not self.log_translate:
+            self.append_log(line)
+            return
+        txt = self._translate_engine_line(line)
+        if txt:
+            self.append_log(txt)
+
+    def _pv_text(self, moves):
+        """UCI 着法序列 -> 中文纵线记谱(利用思考时的局面上下文);
+        无上下文或局面不一致时回退为 h2→e2 坐标形式"""
+        ctx = self._log_ctx
+        if not ctx:
+            return " ".join(f"{m[:2]}→{m[2:4]}"
+                            for m in moves if len(m) >= 4)
+        g = [row[:] for row in ctx["grid"]]
+        flipped = ctx["flipped"]
+        parts = []
+        for mv in moves:
+            if len(mv) < 4:
+                break
+            frm, to = parse_square(mv[:2]), parse_square(mv[2:4])
+            if flipped:  # 引擎方向(黑上红下)坐标转回屏幕方向
+                frm, to = flip_square(frm), flip_square(to)
+            ch = g[frm[0]][frm[1]]
+            if not ch:  # 上下文与引擎脱节, 剩余着法用坐标表示
+                parts.append(f"{mv[:2]}→{mv[2:4]}")
+                break
+            parts.append(cn_notation(ch, frm, to, g))
+            g = apply_move(g, frm, to)
+        return " ".join(parts)
+
+    def _translate_engine_line(self, line):
+        """引擎原始输出 -> 中文; 返回 None 表示该行无需展示(噪音行)"""
+        if line.startswith("> "):  # 发送给引擎的命令
+            cmd = line[2:]
+            if cmd == "uci":
+                return "→ 连接引擎..."
+            if cmd == "isready":
+                return "→ 检查引擎就绪..."
+            if cmd == "ucinewgame":
+                return "→ 通知引擎: 开始新对局"
+            if cmd == "quit":
+                return "→ 通知引擎: 退出"
+            if cmd.startswith("position"):
+                if cmd.startswith("position startpos"):
+                    n = max(0, len(cmd.split()) - 3)
+                    return f"→ 发送局面: 开局起已走 {n} 步"
+                return "→ 发送局面: 当前 FEN"
+            if cmd.startswith("go depth"):
+                return f"→ 开始思考: 深度 {cmd.split()[-1]}"
+            if cmd.startswith("go movetime"):
+                return f"→ 开始思考: 限时 {cmd.split()[-1]}ms"
+            return None
+        if "uciok" in line:
+            return "引擎握手成功 (uciok)"
+        if "readyok" in line:
+            return "引擎准备完成 (readyok)"
+        if line.startswith("bestmove"):
+            parts = line.split()
+            mv = parts[1] if len(parts) > 1 else ""
+            if mv in ("", "(none)", "0000"):
+                return "最佳着法: 无 (对局可能已结束)"
+            return f"✔ 最佳着法: {self._pv_text([mv])}"
+        if line.startswith("info"):
+            d = re.search(r"depth (\d+)", line)
+            pv = re.search(r" pv (.+)$", line)
+            if pv is None:  # currmove 等搜索中间信息, 不展示
+                return None
+            pm = re.search(r"score cp (-?\d+)", line)
+            mm = re.search(r"score mate (-?\d+)", line)
+            if pm is not None:
+                sc = f"评分 {int(pm.group(1)) / 100:+.2f}"
+            elif mm is not None:
+                v = int(mm.group(1))
+                sc = f"{'我方' if v > 0 else '对方'}{abs(v)}步杀!"
+            else:
+                sc = None
+            parts = [f"深度{d.group(1) if d else '?'}"]
+            if sc:
+                parts.append(sc)
+            parts.append("主线: " + self._pv_text(pv.group(1).split()))
+            return " | ".join(parts)
+        return None  # 其余原始行不展示
+
     def sync_view(self, grid):
         """线程安全地刷新损子统计与局面图"""
         def job():
@@ -387,6 +504,7 @@ class Assistant:
             except Exception as e:
                 print(f"[错误] {fn.__name__} 执行失败:")
                 traceback.print_exc()  # 控制台输出完整报错信息
+                self.append_log(f"[错误] {fn.__name__}: {e}")  # 面板日志卡片可见
                 self.set_status(f"出错: {e}")
             finally:
                 self.busy = False
@@ -736,12 +854,19 @@ class Assistant:
         if flipped:
             fen = flip_fen(fen)
         self.set_status("引擎思考中...")
+        self.set_engine_dot("● 引擎思考中", AMBER)
+        # 日志转译上下文: 引擎输出的 pv 主线按此局面逐着转成中文记谱
+        self._log_ctx = {"grid": [row[:] for row in grid], "flipped": flipped}
         if self.use_startpos and not self.desync and self.moves:
             self.engine.position("startpos moves " + " ".join(self.moves))
         else:
             self.engine.position(f"fen {fen} {side} - - 0 1")
-        mv, score, mate = self.engine.go(self.args.movetime,
-                                         depth=getattr(self.args, "depth", 0))
+        try:
+            mv, score, mate = self.engine.go(self.args.movetime,
+                                             depth=getattr(self.args, "depth", 0))
+        finally:
+            if self.engine is not None:  # 思考被异常打断也恢复状态
+                self.set_engine_dot("● 引擎就绪", GREEN)
         if not mv or mv in ("(none)", "0000"):
             self.set_status("无建议(对局可能已结束)")
             self.pending = None
@@ -1207,12 +1332,16 @@ class Assistant:
                 which = shutil.which("pikafish")
                 path = which or path
         try:
-            self.engine = UciEngine(path, self.args.threads, self.args.hash)
+            self.append_log(f"[引擎] 启动 {path}")
+            self.engine = UciEngine(path, self.args.threads, self.args.hash,
+                                    log=self.on_engine_line)
+            self.append_log("[引擎] 就绪")
             self.post(lambda: self.engine_dot.config(
                 text="● 引擎就绪", fg=GREEN))
             self.set_status(f"引擎就绪: {os.path.basename(path)}")
         except Exception as e:
             self.engine = None
+            self.append_log(f"[引擎] 启动失败: {e}")
             self.post(lambda: self.engine_dot.config(
                 text="● 引擎未就绪", fg=ACCENT))
             self.set_status(f"引擎未就绪: {e}")
@@ -1295,6 +1424,7 @@ class Assistant:
         self.move_mode = int(s.get("move_mode", 0))
         self.move_gap_min = float(s.get("move_gap_min", 0.5))
         self.move_gap_max = float(s.get("move_gap_max", 1.0))
+        self.log_translate = bool(s.get("log_translate", True))
 
     def _save_settings(self):
         try:
@@ -1304,7 +1434,8 @@ class Assistant:
                          "hotkey_scan": self.hotkey_scan,
                          "move_mode": self.move_mode,
                          "move_gap_min": self.move_gap_min,
-                         "move_gap_max": self.move_gap_max})
+                         "move_gap_max": self.move_gap_max,
+                         "log_translate": self.log_translate})
             with open(SETTINGS_PATH, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
         except Exception:
@@ -1445,6 +1576,11 @@ class Assistant:
         spin(r, hs_v, 16, 4096)
         ttk.Label(r, text="MB", style="Sub.TLabel").pack(side="left",
                                                          padx=(P(6), 0))
+        log_lt_v = tk.BooleanVar(value=self.log_translate)
+        r = row("日志转译")
+        ttk.Checkbutton(r, text="思考过程转译为中文(关闭则显示原始输出)",
+                        variable=log_lt_v,
+                        style="Card.TCheckbutton").pack(side="left")
         ttk.Label(e, text="深度 > 0 时按深度搜索, 否则按思考时间; "
                           "修改路径/线程/置换表会重启引擎",
                   style="Sub.TLabel", wraplength=P(320),
@@ -1508,6 +1644,7 @@ class Assistant:
             self.move_mode = int(move_v.get())
             self.move_gap_min = min(gmin, gmax)
             self.move_gap_max = max(gmin, gmax)
+            self.log_translate = bool(log_lt_v.get())
             self._save_settings()
             self.refresh_hotkey_hint()  # 按钮快捷键提示即时更新
             for win in (self.panel, self.statusbar):  # 置顶即时生效
@@ -1583,6 +1720,7 @@ class Assistant:
         self.hint_var = tk.StringVar(value="暂无建议")
         self.score_var = tk.StringVar(value="—")
         self.hist_title_var = tk.StringVar(value="对局记录")
+        self.log_title_var = tk.StringVar(value="引擎日志")
 
         # ---- 标题栏 ----
         header = tk.Frame(content, bg=PANEL_BG)
@@ -1722,6 +1860,29 @@ class Assistant:
 
         self.hist_canvas.bind_all("<MouseWheel>", hist_wheel)
         attach_toggle(sec_hist, holder, expanded=False)  # 默认折叠
+
+        # ---- 引擎日志(只读文本, 可折叠) ----
+        sec_log = section("", var=self.log_title_var, parent=self.play_area)
+        log_card = Card(self.play_area, pad=8)
+        log_card.pack(fill="x")
+        lbar = tk.Frame(log_card.inner, bg=CARD)
+        lbar.pack(fill="both", expand=True)
+        self.log_text = tk.Text(
+            lbar, bg=CARD, fg=SUB, bd=0, highlightthickness=0, height=8,
+            wrap="word", font=(FONT, 9), state="disabled", cursor="arrow",
+            padx=P(10), pady=P(8))
+        lscroll = tk.Scrollbar(lbar, orient="vertical", width=P(8),
+                               troughcolor=CARD, bg=LINE, activebackground=SUB,
+                               bd=0, elementborderwidth=0,
+                               command=self.log_text.yview)
+        self.log_text.configure(yscrollcommand=lscroll.set)
+        lscroll.pack(side="right", fill="y")
+        self.log_text.pack(side="left", fill="both", expand=True)
+        self.log_text.insert("1.0", "等待引擎输出...\n")
+        self.log_text.tag_add("ph", "1.0", "end")
+        self.log_text.tag_configure("ph", foreground=FAINT)
+        self.log_text.bind("<Button-1>", lambda e: None)  # 保留选择, 不绑拖动
+        attach_toggle(sec_log, log_card, expanded=False)  # 默认折叠
 
         # ---- 操作按钮: 红色主按钮 + 浅灰次按钮 ----
         btns = tk.Frame(self.play_area, bg=PANEL_BG)
