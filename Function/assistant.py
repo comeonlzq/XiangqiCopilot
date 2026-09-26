@@ -670,38 +670,27 @@ class Assistant:
         self.run_task(lambda: self.task_setup_capture(box))
 
     def task_initial_scan(self):
-        """框选完成后自动识别一次棋盘并渲染(不同步对局状态)"""
+        """框选完成后自动识别一次棋盘并渲染(不同步对局状态);
+        失败时保留框选区域, 可在面板点「识别」重试或「重新截图」更换"""
         try:
             grid, _fen, _path = self.capture_and_recognize()
         except Exception:
-            self._reset_capture()
-            self.set_status("识别失败, 已回到初始状态, 请重新截图")
+            self.set_status("识别失败, 可点「识别」重试, 或「重新截图」更换区域")
             return
         n = sum(1 for row in grid for ch in row if ch)
         if not n:
             self.post(lambda: self.draw_board(
                 None, warn="未识别到棋子, 请检查框选区域"))
-            self.set_status("未识别到棋子, 请检查框选区域")
-            self._reset_capture()
+            self.set_status("未识别到棋子, 可点「识别」重试, 或「重新截图」更换区域")
             return
         self.sync_view(grid)
         self.set_status(f"棋盘识别完成(共{n}枚棋子), 点「给出建议」同步对局")
 
-    def _reset_capture(self):
-        """识别失败后回到未截图状态, 允许重新框选(主线程销毁窗口)"""
-        def job():
-            for w in (self.border, self.statusbar):
-                if w is not None:
-                    try:
-                        w.destroy()
-                    except Exception:
-                        pass
-            self.border = None
-            self.statusbar = None
-            self.bar_hint_lbl = None
-            self.bbox = None
-            self.refresh_capture_ui()
-        self.post(job)
+    def on_re_recognize(self):
+        """「识别」按钮: 不重新框选, 按当前框选区域重新识别一次"""
+        if self.busy or self.bbox is None:
+            return
+        self.run_task(self.task_initial_scan)
 
     # ---------------- 两个主按钮 ----------------
     def on_opponent(self):
@@ -1055,7 +1044,17 @@ class Assistant:
             self.btn_capture.config(text="重新截图" if self.bbox else
                                     ("截图" if calibrated else "初始化配置"))
             self.btn_cap_mini.config(state=tk.NORMAL)
-            self.btn_cap_mini.config(text="重新截图" if self.bbox else "截图")
+        # 局面评估标题栏文字按钮固定为引导文案; 棋盘内嵌按钮同步忙碌状态
+        self.btn_cap_mini.config(text="识别有误？重新截图")
+        if self.bbox is None:  # 未截图: 棋盘内已有大号「截图」引导, 标题栏不显示
+            self.btn_cap_mini.pack_forget()
+        elif not self.btn_cap_mini.winfo_ismapped():
+            self.btn_cap_mini.pack(side="right")
+        for b in getattr(self, "_board_btns", []):
+            try:
+                b.config(state=tk.DISABLED if self.busy else tk.NORMAL)
+            except tk.TclError:
+                pass
         if not calibrated:
             self.cap_hint_lbl.config(
                 text="首次使用: 请把棋盘调到开局局面(32 枚棋子), 点「初始化配置」"
@@ -1190,16 +1189,17 @@ class Assistant:
         for r, c in ((2, 1), (2, 7), (7, 1), (7, 7), (3, 0), (3, 2), (3, 4),
                      (3, 6), (3, 8), (6, 0), (6, 2), (6, 4), (6, 6), (6, 8)):
             ticks(r, c)
-        # 空局面: 占位文字 / 识别失败警示
+        # 空局面: 占位文字 / 识别失败警示 + 截图引导按钮
         bw = (rec.COLS - 1) * cell + 2 * m       # 棋盘本体宽度(不含损子条)
         if grid is None:
             if warn:
-                cv.create_text(bw / 2, y(4.5), text=f"⚠ {warn}", fill=ACCENT,
+                cv.create_text(bw / 2, y(3.5), text=f"⚠ {warn}", fill=ACCENT,
                                font=("Microsoft YaHei", 10, "bold"),
                                justify="center", width=bw - P(24))
             else:
-                cv.create_text(bw / 2, y(4.5), text="尚未同步局面", fill=FAINT,
-                               font=("Microsoft YaHei", 10))
+                cv.create_text(bw / 2, y(3.5), text="尚未同步局面", fill=SUB,
+                               font=("Microsoft YaHei", 11))
+            self._empty_guide_buttons(cv, bw, y(4.9))
             self._draw_loss_strip(cv, W, m, cell)
             return
         # 楚河汉界
@@ -1221,6 +1221,39 @@ class Assistant:
                                font=("Microsoft YaHei", 12, "bold"))
         # 右侧竖排展示被吃棋子
         self._draw_loss_strip(cv, W, m, cell)
+
+    def _empty_guide_buttons(self, cv, bw, cy):
+        """「尚未同步局面」下方的引导按钮(嵌入画布, 随重绘重建):
+        未截图 → 大号「截图」; 已截图 → 「重新截图」+「识别」"""
+        for w in getattr(self, "_board_btns", []):  # 清掉上一轮嵌入的按钮
+            try:
+                w.destroy()
+            except tk.TclError:
+                pass
+        self._board_btns = []
+        st = tk.DISABLED if self.busy else tk.NORMAL
+
+        def add(btn, cx):
+            btn.config(state=st)
+            self._board_btns.append(btn)
+            cv.create_window(cx, cy, window=btn, anchor="center")
+
+        if self.bbox is None:
+            add(RoundButton(cv, text="截图", command=self.on_capture,
+                            height=42, radius=12, width=132,
+                            font=(FONT, 13, "bold"), frame_bg=CARD), bw / 2)
+        else:
+            cap_b = RoundButton(cv, text="重新截图", command=self.on_capture,
+                                height=36, radius=10, bg=FIELD, fg=TXT,
+                                hover=FIELD_HOVER, font=(FONT, 11),
+                                frame_bg=CARD)
+            rec_b = RoundButton(cv, text="识别", command=self.on_re_recognize,
+                                height=36, radius=10,
+                                font=(FONT, 11, "bold"), frame_bg=CARD)
+            gap = P(14)
+            wc, wr = int(cap_b.cget("width")), int(rec_b.cget("width"))
+            add(cap_b, bw / 2 - gap / 2 - wc / 2)   # 左: 重新截图
+            add(rec_b, bw / 2 + gap / 2 + wr / 2)   # 右: 识别
 
     def _draw_loss_strip(self, cv, W, m, cell):
         """棋盘右侧竖排展示双方损失棋子: 每侧两列、按价值降序, 红方自顶部
@@ -1801,10 +1834,12 @@ class Assistant:
 
         # ---- 局面评估: 局面图 + 得分 ----
         sec_eval = section("局面评估", parent=self.play_area)
-        self.btn_cap_mini = RoundButton(sec_eval, text="截图",
+        self.btn_cap_mini = RoundButton(sec_eval, text="识别有误？重新截图",
                                         command=self.on_capture,
-                                        height=26, radius=8, width=64,
-                                        bg=FIELD, fg=TXT, hover=FIELD_HOVER,
+                                        height=24, radius=8,
+                                        bg=PANEL_BG, fg=SUB, hover=FIELD,
+                                        disabled_bg=PANEL_BG,
+                                        disabled_fg=FAINT,
                                         font=(FONT, 9), frame_bg=PANEL_BG)
         self.btn_cap_mini.pack(side="right")
         card = Card(self.play_area, pad=8)  # 内边距随缩放, 内部宽度容纳评分曲线
