@@ -70,10 +70,7 @@ KEY = "#010203"       # 透明键色: 实现窗口圆角
 FONT = "Microsoft YaHei"
 HOTKEY_NAMES = {0x36: "右Shift", 0x2A: "左Shift", 0x42: "F8", 0x43: "F9"}
 # 棋子价值(用于损子展示排序, 大子在前)
-PIECE_VAL = {"K": 10000, "A": 200, "N": 170, "R": 100, "C": 90, "P": 50}
-SETTINGS_PATH = os.path.join(BASE, "settings", "engine_settings.json")  # 引擎设置持久化
-# 初始化配置标注图(每颗棋子的识别结果)保存在模板目录, 供设置页回显
-SETUP_ANN_PATH = os.path.join(BASE, "templates", "init_annotated.png")
+PIECE_VAL = {"K": 10000, "A": 200, "N": 170, "B": 120, "R": 100, "C": 90, "P": 50}
 
 
 # ---------------- 圆角控件与主题 ----------------
@@ -237,6 +234,75 @@ class Pill(tk.Frame):
     config = configure
 
 
+def _flat_indicator_imgs(root, style):
+    """用 Pillow 生成扁平勾选框/单选圆点图, 替换 clam 自带立体指示器;
+    失败(如无 Pillow)返回 False, 由调用方回退原生配色"""
+    try:
+        from PIL import Image, ImageDraw, ImageTk
+    except Exception:
+        return False
+    s = P(16)   # 指示器图形边长
+    gap = P(8)  # 图形与文字间距
+    k = 4       # 超采样倍率(缩小抗锯齿)
+    keep = []   # 持有 PhotoImage 引用, 防止被垃圾回收
+
+    def mk(kind, on, hover):
+        u = s * k  # 超采样后的图形边长
+        im = Image.new("RGBA", ((s + gap) * k, u), (0, 0, 0, 0))
+        d = ImageDraw.Draw(im)
+        if kind == "check":
+            if on:
+                d.rounded_rectangle([0, 0, u - 1, u - 1], radius=u * 0.28,
+                                    fill=ACCENT_HOVER if hover else ACCENT)
+                lw = max(2 * k, int(u * 0.14))
+                d.line([(u * 0.24, u * 0.52), (u * 0.42, u * 0.70),
+                        (u * 0.76, u * 0.32)], fill="#ffffff", width=lw,
+                       joint="curve")
+            else:
+                d.rounded_rectangle([0, 0, u - 1, u - 1], radius=u * 0.28,
+                                    fill="#ffffff",
+                                    outline="#b9c0c9" if hover else "#c9ced6",
+                                    width=k)
+        else:  # radio
+            d.ellipse([k // 2, k // 2, u - 1 - k // 2, u - 1 - k // 2],
+                      fill="#ffffff",
+                      outline=ACCENT if on else
+                      ("#aeb6c0" if hover else "#c2c8d1"),
+                      width=max(k, int(u * 0.11)))
+            if on:
+                c, r = u / 2, u * 0.21
+                d.ellipse([c - r, c - r, c + r, c + r], fill=ACCENT)
+        pi = ImageTk.PhotoImage(im.resize((s + gap, s), Image.LANCZOS),
+                                master=root)
+        keep.append(pi)
+        return pi
+
+    try:
+        for cls, kind, ind in (("TCheckbutton", "check", "Card.Checkbox.indicator"),
+                               ("TRadiobutton", "radio", "Card.Radio.indicator")):
+            style.element_create(ind, "image",
+                                 mk(kind, False, False),
+                                 ("active", mk(kind, False, True)),
+                                 ("selected", mk(kind, True, False)),
+                                 ("selected active", mk(kind, True, True)),
+                                 sticky="w")
+            pfx = cls[1:]  # Checkbutton / Radiobutton
+            style.layout(f"Card.{cls}", [
+                (f"{pfx}.padding", {
+                    "side": "left", "sticky": "", "expand": 1,
+                    "children": [
+                        (ind, {"side": "left", "sticky": ""}),
+                        (f"{pfx}.focus", {
+                            "side": "left", "expand": 1,
+                            "children": [
+                                (f"{pfx}.label",
+                                 {"side": "left", "sticky": "nswe"})]})]})])
+    except Exception:
+        return False
+    root._flat_ind_imgs = keep
+    return True
+
+
 def _init_style(root):
     """ttk.Style: 为设置窗口等标准控件配置扁平主题"""
     style = ttk.Style(root)
@@ -280,9 +346,13 @@ def _init_style(root):
                         focuscolor=CARD, font=(FONT, 10), padding=P(4))
         style.map(f"Card.{cls}",
                   background=[("active", CARD)],
-                  foreground=[("active", TXT)],
-                  indicatorcolor=[("selected", ACCENT),
-                                  ("active", "#dfe2e6")])
+                  foreground=[("active", TXT)])
+    if not _flat_indicator_imgs(root, style):
+        # 无 Pillow 时回退 clam 原生指示器配色
+        for cls in ("TCheckbutton", "TRadiobutton"):
+            style.map(f"Card.{cls}",
+                      indicatorcolor=[("selected", ACCENT),
+                                      ("active", "#dfe2e6")])
 
 
 class Assistant:
@@ -295,6 +365,8 @@ class Assistant:
         self.move_mode = 0        # 走子模式: 0无 / 1移动鼠标 / 2自动走子
         self.move_gap_min = 0.5   # 自动走子两次点击随机间隔下限(秒)
         self.move_gap_max = 1.0   # 自动走子两次点击随机间隔上限(秒)
+        self.show_loss = True     # 棋盘右侧显示双方损失棋子
+        self.hide_on_capture = True  # 设置页截图框选时自动隐藏设置窗口
         self._load_settings()     # 恢复上次保存的设置
         self.root = root
         self.bbox = None          # 框选区域 (x1,y1,x2,y2)
@@ -308,6 +380,7 @@ class Assistant:
         self.initial = None       # 首次同步的局面(用于统计双方损子)
         self.lost_red = []        # 红方被吃棋子字符列表(棋盘右侧竖排展示)
         self.lost_black = []      # 黑方被吃棋子字符列表
+        self.cur_grid = None      # 最近一次同步展示的局面(设置变更后重绘用)
         self.score_hist = []      # 引擎评分历史(供曲线图)
         self.engine = None
         self._log_count = 0       # 引擎日志累计行数(标题计数用)
@@ -396,6 +469,18 @@ class Assistant:
         t.configure(state="disabled")
         if at_bottom:
             t.see("end")
+
+    def _clear_engine_log(self):
+        """清空引擎日志卡片, 恢复占位提示"""
+        self._log_count = 0
+        self.log_title_var.set("引擎日志")
+        t = getattr(self, "log_text", None)
+        if t is not None and t.winfo_exists():
+            t.configure(state="normal")
+            t.delete("1.0", "end")
+            t.insert("1.0", "等待引擎输出...\n")
+            t.tag_add("ph", "1.0", "end")
+            t.configure(state="disabled")
 
     def on_engine_line(self, line):
         """引擎输出回调: 按设置转译为中文, 或原样展示(可从工作线程调用)"""
@@ -486,6 +571,7 @@ class Assistant:
     def sync_view(self, grid):
         """线程安全地刷新损子统计与局面图"""
         def job():
+            self.cur_grid = grid
             self.refresh_loss(grid)
             self.draw_board(grid)
         self.post(job)
@@ -499,12 +585,13 @@ class Assistant:
         self.clear_markers()
 
         def work():
+            name = getattr(fn, "__name__", "任务")  # partial 无 __name__
             try:
                 fn()
             except Exception as e:
-                print(f"[错误] {fn.__name__} 执行失败:")
+                print(f"[错误] {name} 执行失败:")
                 traceback.print_exc()  # 控制台输出完整报错信息
-                self.append_log(f"[错误] {fn.__name__}: {e}")  # 面板日志卡片可见
+                self.append_log(f"[错误] {name}: {e}")  # 面板日志卡片可见
                 self.set_status(f"出错: {e}")
             finally:
                 self.busy = False
@@ -594,80 +681,6 @@ class Assistant:
             pass
         self.refresh_capture_ui()
         self.run_task(self.task_initial_scan)
-
-    def task_setup_capture(self, box):
-        """设置页「棋盘识别」: 框选开局棋盘 -> 标定 -> 识别并生成标注图"""
-        path = self._grab(box)
-        self.set_status("正在标定棋盘...")
-        try:
-            rec.calibrate(path)
-        except Exception as e:
-            self.post(lambda: self._setup_show_result(None, f"标定失败: {e}", False))
-            return
-        try:
-            grid, _fen = rec.recognize(path, thr=self.args.thr,
-                                       debug_out=SETUP_ANN_PATH)
-        except Exception as e:
-            self.post(lambda: self._setup_show_result(None, f"识别失败: {e}", False))
-            return
-        grid = [[c for c in row] for row in grid]
-        expect = sum(1 for r in OPEN_GRID for c in r if c)
-        got = sum(1 for r in grid for c in r if c)
-        wrong = sum(1 for r in range(rec.ROWS) for c in range(rec.COLS)
-                    if grid[r][c] != OPEN_GRID[r][c])
-        if wrong == 0:
-            msg = f"识别成功: 开局 {got} 枚棋子全部匹配"
-        else:
-            msg = (f"识别到 {got}/{expect} 枚棋子, 有 {wrong} 处与开局不符, "
-                   "请确认棋盘为开局局面后重新截图")
-        self.post(lambda: self._setup_show_result(SETUP_ANN_PATH, msg, wrong == 0))
-        self.post(self.refresh_capture_ui)  # 标定完成 -> 面板切换到「截图」
-
-    def _setup_show_result(self, img_path, msg, ok):
-        """在设置页「棋盘识别」展示标注图与识别结论(主线程)"""
-        lbl = getattr(self, "_setup_status_lbl", None)
-        if lbl is None:
-            return
-        try:
-            if not lbl.winfo_exists():  # 设置窗口已关闭, 忽略结果回显
-                return
-            lbl.config(text=msg, fg=GREEN if ok else ACCENT)
-        except tk.TclError:
-            return
-        if img_path and os.path.exists(img_path):
-            self._setup_show_image(img_path)
-
-    def _setup_show_image(self, path):
-        """把标注图缩放后显示在设置页画布上"""
-        try:
-            from PIL import Image, ImageTk
-            im = Image.open(path)
-            maxw, maxh = P(320), P(360)
-            s = min(maxw / im.width, maxh / im.height, 1.0)
-            im = im.resize((max(1, int(im.width * s)),
-                            max(1, int(im.height * s))))
-            self._setup_photo = ImageTk.PhotoImage(im)
-            cv = self._setup_cv
-            cv.delete("all")
-            cv.configure(width=im.width, height=im.height)
-            cv.create_image(0, 0, anchor="nw", image=self._setup_photo)
-        except Exception:
-            print("[棋盘识别] 标注图显示失败:")
-            traceback.print_exc()
-
-    def _setup_take_screenshot(self):
-        """设置页「截图」: 释放模态 -> 全屏框选 -> 后台标定+识别"""
-        if self.busy:
-            return
-        w = self._set_win
-        if w is not None and w.winfo_exists():
-            w.grab_release()
-        box = self._select_bbox()
-        if w is not None and w.winfo_exists():
-            w.grab_set()
-        if box is None:
-            return
-        self.run_task(lambda: self.task_setup_capture(box))
 
     def task_initial_scan(self):
         """框选完成后自动识别一次棋盘并渲染(不同步对局状态);
@@ -1002,6 +1015,9 @@ class Assistant:
 
     # ---------------- 重置/按钮 ----------------
     def on_reset(self):
+        """重置对局: 清空同步状态/记录/日志, 重启引擎并重新识别棋盘"""
+        if self.busy:
+            return
         self.prev = None
         self.moves = []
         self.use_startpos = False
@@ -1009,17 +1025,33 @@ class Assistant:
         self.pending = None
         self.history = []
         self.initial = None
+        self.side = None          # 执子颜色一并清空, 新对局重新判定
+        self.cur_grid = None
+        self._log_ctx = None
         self.clear_hint()
         self.lost_red = []
         self.lost_black = []
         self.score_hist = []
         self.draw_score_chart()
         self.clear_markers()
-        self.draw_board(None)
         self.refresh_history()
-        if self.engine is not None:
-            self.engine.ucinewgame()
-        self.set_status("已重置, 点击任意按钮重新同步局面")
+        self._clear_engine_log()  # 日志清空, 一切重来
+        self.draw_board(None)     # 先清掉旧局面展示
+        self.run_task(self.task_reset)
+
+    def task_reset(self):
+        """重置任务: 退出旧引擎并重新连接, 再按当前框选区域重新识别棋盘"""
+        eng, self.engine = self.engine, None
+        if eng is not None:
+            try:
+                eng.quit()
+            except Exception:
+                pass
+        self.init_engine()
+        if self.bbox is not None:
+            self.task_initial_scan()
+        else:
+            self.set_status("已重置, 请先框选棋盘")
 
     def refresh_capture_ui(self):
         """按「是否已标定 / 是否已截图」更新截图引导与按钮;
@@ -1147,8 +1179,8 @@ class Assistant:
         棋盘右侧竖排展示双方被吃掉的棋子(直接画小棋子, 不用 ×N 计数)"""
         cv = self.board_cv
         cv.delete("all")
-        cell, m = P(30), P(16)                   # 格距 / 左边距
-        lw = P(60)                               # 右侧损子展示条宽度(两列)
+        cell, m = P(30), P(16)                   # 格距 / 边距
+        lw = P(60) if self.show_loss else m      # 右侧损子条宽度(两列)/右边距
         W = (rec.COLS - 1) * cell + m + lw
         H = (rec.ROWS - 1) * cell + 2 * m
         cv.configure(width=W, height=H)
@@ -1258,6 +1290,8 @@ class Assistant:
     def _draw_loss_strip(self, cv, W, m, cell):
         """棋盘右侧竖排展示双方损失棋子: 每侧两列、按价值降序, 红方自顶部
         向下、黑方自底部向上, 与棋盘上下半区对应"""
+        if not self.show_loss:  # 设置中关闭了损子显示
+            return
         H = m * 2 + (rec.ROWS - 1) * cell
         r = max(7, int(cell * 0.32))         # 小棋子半径(比单列时更大)
         gap = r * 2 + P(3)                   # 棋子纵向间距
@@ -1281,6 +1315,10 @@ class Assistant:
 
         col(self.lost_red, m + r, 1)      # 上半区: 红方损失, 自顶向下
         col(self.lost_black, H - m - r, -1)  # 下半区: 黑方损失, 自底向上
+
+    def redraw_board(self):
+        """设置变更(如损子显隐开关)后按最近同步的局面重绘"""
+        self.draw_board(self.cur_grid)
 
     def draw_score_chart(self):
         """绘制评分曲线: 横轴(0 基线)居中, 纵轴在左; 量程自适应不限幅"""
@@ -1442,272 +1480,20 @@ class Assistant:
 
         threading.Thread(target=loop, daemon=True).start()
 
-    # ---------------- 引擎设置 ----------------
+    # ---------------- 设置(实现见 settings_window.py) ----------------
     def _load_settings(self):
-        try:
-            with open(SETTINGS_PATH, encoding="utf-8") as f:
-                s = json.load(f)
-        except Exception:
-            return
-        for k in ("engine", "movetime", "depth", "threads", "hash"):
-            if k in s:
-                setattr(self.args, k, s[k])
-        self.topmost = bool(s.get("topmost", True))
-        self.hotkey_scan = int(s.get("hotkey_scan", 0x36))
-        self.move_mode = int(s.get("move_mode", 0))
-        self.move_gap_min = float(s.get("move_gap_min", 0.5))
-        self.move_gap_max = float(s.get("move_gap_max", 1.0))
-        self.log_translate = bool(s.get("log_translate", True))
+        from settings_window import load_settings
+        load_settings(self)
 
     def _save_settings(self):
-        try:
-            data = {k: getattr(self.args, k) for k in
-                    ("engine", "movetime", "depth", "threads", "hash")}
-            data.update({"topmost": self.topmost,
-                         "hotkey_scan": self.hotkey_scan,
-                         "move_mode": self.move_mode,
-                         "move_gap_min": self.move_gap_min,
-                         "move_gap_max": self.move_gap_max,
-                         "log_translate": self.log_translate})
-            with open(SETTINGS_PATH, "w", encoding="utf-8") as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
-        except Exception:
-            print("[设置] 保存失败:")
-            traceback.print_exc()
+        from settings_window import save_settings
+        save_settings(self)
 
     def open_settings(self, tab=None):
-        """弹出设置窗口: 棋盘识别 / 常规 / 引擎 / 走子 选项卡 (ttk 扁平主题)
+        """弹出设置窗口(棋盘识别/常规/界面设置/引擎/走子),
         tab 指定要激活的选项卡标题"""
-        if self._set_win is not None and self._set_win.winfo_exists():
-            self._set_win.deiconify()
-            self._set_win.lift()
-            f = getattr(self._set_win, "_set_tabs", {}).get(tab)
-            if f is not None:
-                try:
-                    self._set_win._nb.select(f)
-                except Exception:
-                    pass
-            return
-        from tkinter import filedialog, messagebox
-        a = self.args
-        w = tk.Toplevel(self.root)
-        w.title("设置")
-        w.configure(bg=PANEL_BG)
-        w.resizable(False, False)
-        w.attributes("-topmost", True)
-        self._set_win = w
-
-        # ---- 选项卡 ----
-        nb = ttk.Notebook(w)
-        nb.pack(fill="both", expand=True, padx=P(14), pady=(P(14), 0))
-        w._nb = nb
-
-        def tab_frame(title):
-            f = ttk.Frame(nb, style="Card.TFrame",
-                          padding=(P(18), P(10), P(18), P(16)))
-            nb.add(f, text=title, sticky="nsew")
-            w._set_tabs[title] = f
-            return f
-
-        w._set_tabs = {}
-
-        def grow(parent):
-            f = ttk.Frame(parent, style="Card.TFrame")
-            f.pack(fill="x", pady=(P(10), 0))
-            return f
-
-        # ---- 棋盘识别(初始化配置) ----
-        bi = tab_frame("棋盘识别")
-        ttk.Label(bi, text="首次使用需截取一张「开局局面」图完成标定: "
-                           "双方 32 枚棋子就位后点「截图」框选棋盘区域。",
-                  style="Sub.TLabel", wraplength=P(340),
-                  justify="left").pack(fill="x")
-        r = grow(bi)
-        RoundButton(r, text="截图", command=self._setup_take_screenshot,
-                    height=34, radius=10, font=(FONT, 11, "bold"),
-                    frame_bg=CARD).pack(side="left")
-        self._setup_status_lbl = tk.Label(bi, bg=CARD, fg=SUB,
-                                          font=(FONT, 10), justify="left",
-                                          anchor="w", wraplength=P(340))
-        self._setup_status_lbl.pack(fill="x", pady=(P(8), 0))
-        self._setup_cv = tk.Canvas(bi, bg=CARD, bd=0, highlightthickness=0,
-                                   width=P(320), height=P(360))
-        self._setup_cv.pack(pady=(P(8), 0))
-        if os.path.exists(rec.CALIB_PATH):
-            if os.path.exists(SETUP_ANN_PATH):
-                self._setup_status_lbl.config(
-                    text="已完成标定, 下图为最近一次初始化识别结果", fg=GREEN)
-                self._setup_show_image(SETUP_ANN_PATH)
-            else:
-                self._setup_status_lbl.config(
-                    text="已完成标定, 可点「截图」重新标定", fg=GREEN)
-        else:
-            self._setup_status_lbl.config(
-                text="尚未完成初始化配置, 请先截图", fg=ACCENT)
-
-        # ---- 常规设置 ----
-        g = tab_frame("常规")
-        topmost_v = tk.BooleanVar(value=self.topmost)
-        hotkey_v = tk.IntVar(value=self.hotkey_scan)
-        r = grow(g)
-        ttk.Label(r, text="窗口置顶", style="Card.TLabel", width=9).pack(
-            side="left")
-        ttk.Checkbutton(r, text="面板与状态栏保持在最前", variable=topmost_v,
-                        style="Card.TCheckbutton").pack(side="left")
-        r = grow(g)
-        ttk.Label(r, text="建议快捷键", style="Card.TLabel", width=9).pack(
-            side="left")
-        for text, val in (("右 Shift", 0x36), ("左 Shift", 0x2A),
-                          ("F8", 0x42), ("F9", 0x43), ("禁用", 0)):
-            ttk.Radiobutton(r, text=text, variable=hotkey_v, value=val,
-                            style="Card.TRadiobutton").pack(
-                side="left", padx=(0, P(10)))
-        ttk.Label(g, text="快捷键全局生效, 任意窗口在前台时均可触发",
-                  style="Sub.TLabel").pack(anchor="w", pady=(P(10), P(4)))
-
-        # ---- 引擎设置 ----
-        e = tab_frame("引擎")
-        path_v = tk.StringVar(value=str(a.engine))
-        mt_v = tk.StringVar(value=str(a.movetime))
-        dp_v = tk.StringVar(value=str(getattr(a, "depth", 0)))
-        th_v = tk.StringVar(value=str(a.threads))
-        hs_v = tk.StringVar(value=str(a.hash))
-
-        def row(label):
-            f = ttk.Frame(e, style="Card.TFrame")
-            f.pack(fill="x", pady=(P(10), 0))
-            ttk.Label(f, text=label, style="Card.TLabel", width=9).pack(
-                side="left")
-            return f
-
-        def spin(parent, var, lo, hi):
-            ttk.Spinbox(parent, textvariable=var, from_=lo, to=hi, width=7,
-                        style="Field.TSpinbox").pack(side="left")
-
-        r = row("引擎路径")
-        ttk.Entry(r, textvariable=path_v, style="Field.TEntry").pack(
-            side="left", fill="x", expand=True)
-        RoundButton(r, text="浏览...", height=28, radius=8, bg=FIELD, fg=TXT,
-                    hover=FIELD_HOVER, font=(FONT, 9), frame_bg=CARD,
-                    command=lambda: path_v.set(
-                        filedialog.askopenfilename(
-                            title="选择 UCI 引擎",
-                            filetypes=[("可执行文件", "*.exe"),
-                                       ("所有文件", "*.*")])
-                        or path_v.get())).pack(side="left", padx=(P(10), 0))
-        r = row("思考时间")
-        spin(r, mt_v, 0, 60000)
-        ttk.Label(r, text="ms (0=引擎默认)", style="Sub.TLabel").pack(
-            side="left", padx=(P(6), 0))
-        r = row("搜索深度")
-        spin(r, dp_v, 0, 60)
-        ttk.Label(r, text="层 (0=按思考时间)", style="Sub.TLabel").pack(
-            side="left", padx=(P(6), 0))
-        r = row("线程数")
-        spin(r, th_v, 1, 128)
-        r = row("置换表")
-        spin(r, hs_v, 16, 4096)
-        ttk.Label(r, text="MB", style="Sub.TLabel").pack(side="left",
-                                                         padx=(P(6), 0))
-        log_lt_v = tk.BooleanVar(value=self.log_translate)
-        r = row("日志转译")
-        ttk.Checkbutton(r, text="思考过程转译为中文(关闭则显示原始输出)",
-                        variable=log_lt_v,
-                        style="Card.TCheckbutton").pack(side="left")
-        ttk.Label(e, text="深度 > 0 时按深度搜索, 否则按思考时间; "
-                          "修改路径/线程/置换表会重启引擎",
-                  style="Sub.TLabel", wraplength=P(320),
-                  justify="left").pack(fill="x", pady=(P(10), P(4)))
-
-        # ---- 走子设置 ----
-        mv = tab_frame("走子")
-        move_v = tk.IntVar(value=self.move_mode)
-        for text, val, desc in (
-                ("无", 0, "仅显示建议与棋盘标记, 手动走子"),
-                ("自动移动鼠标", 1, "给出建议后, 鼠标自动移到推荐起点"),
-                ("自动走子", 2, "给出建议后, 自动点击起点再点击落点")):
-            r = grow(mv)
-            ttk.Radiobutton(r, text=text, variable=move_v, value=val,
-                            style="Card.TRadiobutton").pack(side="top",
-                                                            anchor="w")
-            ttk.Label(r, text="        " + desc, style="Sub.TLabel").pack(
-                side="top", anchor="w")
-        gap_min_v = tk.StringVar(value=f"{self.move_gap_min:g}")
-        gap_max_v = tk.StringVar(value=f"{self.move_gap_max:g}")
-        r = grow(mv)
-        ttk.Label(r, text="点击间隔范围", style="Card.TLabel", width=9).pack(
-            side="left")
-        ttk.Spinbox(r, textvariable=gap_min_v, from_=0.1, to=30.0,
-                    increment=0.1, format="%.1f", width=5,
-                    style="Field.TSpinbox").pack(side="left")
-        ttk.Label(r, text="~", style="Sub.TLabel").pack(side="left",
-                                                        padx=P(6))
-        ttk.Spinbox(r, textvariable=gap_max_v, from_=0.1, to=30.0,
-                    increment=0.1, format="%.1f", width=5,
-                    style="Field.TSpinbox").pack(side="left")
-        ttk.Label(r, text="秒 (两次点击间的随机等待)",
-                  style="Sub.TLabel").pack(side="left", padx=(P(6), 0))
-        ttk.Label(mv, text="自动走子通过模拟鼠标两次点击完成(起点→落点), 请勿遮挡棋盘窗口",
-                  style="Sub.TLabel").pack(anchor="w", pady=(P(10), P(4)))
-
-        def apply():
-            path = path_v.get().strip().strip('"')
-            if not path:
-                messagebox.showerror("设置", "请填写引擎路径")
-                return
-            try:
-                mt, dp = int(mt_v.get()), int(dp_v.get())
-                th, hs = int(th_v.get()), int(hs_v.get())
-                gmin, gmax = float(gap_min_v.get()), float(gap_max_v.get())
-            except ValueError:
-                messagebox.showerror("设置", "数值格式不正确")
-                return
-            if gmin <= 0 or gmax <= 0:
-                messagebox.showerror("设置", "点击间隔须大于 0 秒")
-                return
-            if self.busy:
-                messagebox.showinfo("设置", "正在计算中, 请稍后再应用")
-                return
-            restart = (self.engine is None or path != a.engine
-                       or th != a.threads or hs != a.hash)
-            a.engine, a.movetime, a.depth = path, max(0, mt), max(0, dp)
-            a.threads, a.hash = max(1, th), max(16, hs)
-            self.topmost = bool(topmost_v.get())
-            self.hotkey_scan = int(hotkey_v.get())
-            self.move_mode = int(move_v.get())
-            self.move_gap_min = min(gmin, gmax)
-            self.move_gap_max = max(gmin, gmax)
-            self.log_translate = bool(log_lt_v.get())
-            self._save_settings()
-            self.refresh_hotkey_hint()  # 按钮快捷键提示即时更新
-            for win in (self.panel, self.statusbar):  # 置顶即时生效
-                if win is not None:
-                    try:
-                        win.wm_attributes("-topmost", self.topmost)
-                    except Exception:
-                        pass
-            w.destroy()
-            if restart:
-                self.run_task(self.task_restart_engine)
-            else:
-                self.set_status("设置已应用: "
-                                + (f"深度{dp}" if dp else f"思考{mt}ms"))
-
-        btns = ttk.Frame(w, style="Panel.TFrame")
-        btns.pack(fill="x", padx=P(18), pady=(P(12), P(16)))
-        RoundButton(btns, text="应用", command=apply, height=36, radius=10,
-                    width=92, font=(FONT, 11, "bold"),
-                    frame_bg=PANEL_BG).pack(side="right")
-        RoundButton(btns, text="取消", command=w.destroy, height=36,
-                    radius=10, width=92, bg=FIELD, fg=TXT,
-                    hover=FIELD_HOVER, font=(FONT, 11),
-                    frame_bg=PANEL_BG).pack(side="right", padx=(0, P(10)))
-
-        w.update_idletasks()
-        w.geometry(f"+{self.panel.winfo_x() + P(40)}"
-                   f"+{self.panel.winfo_y() + P(40)}")
-        w.grab_set()
-        w.focus_set()
+        from settings_window import open_settings
+        open_settings(self, tab)
 
     # ---------------- GUI ----------------
     def run(self):

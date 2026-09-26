@@ -18,6 +18,7 @@
   - Function/engine.py      皮卡鱼 UCI 引擎封装
   - Function/overlay.py     屏幕交互(DPI 适配、框选、覆盖窗)
   - Function/assistant.py   助手主体(识谱同步、引擎提示、悬浮面板 GUI)
+  - Function/settings_window.py  设置窗口(选项卡 UI、设置持久化)
   - settings/               配置持久化(engine_settings.json、calibration.json)
   - auto_play.py            本文件: 命令行入口(根目录唯一入口)
 
