@@ -138,6 +138,11 @@ def calibrate(img_path):
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     bx, by, bw, bh = board_bbox(img)
     centers, r_med = piece_centers(gray)
+    # 只保留棋盘区域内的圆心, 防止画面其他位置的误检圆污染行/列聚类
+    if len(centers):
+        keep = ((centers[:, 0] >= bx) & (centers[:, 0] <= bx + bw)
+                & (centers[:, 1] >= by) & (centers[:, 1] <= by + bh))
+        centers = centers[keep]
     print(f"[标定] 棋盘区域 x={bx} y={by} w={bw} h={bh}, 检测到棋子圆 {len(centers)} 个, 半径≈{r_med}")
     if len(centers) < 20:
         raise RuntimeError("棋子检测过少, 标定请使用开局(32 子)截图")
@@ -154,6 +159,13 @@ def calibrate(img_path):
     dx = (x8 - x0) / (COLS - 1)
     y0, y9 = ys[0][0], ys[-1][0]
     dy = (y9 - y0) / (ROWS - 1)
+    # 校验: 网格间距必须落在图片范围内, 且纵横比例接近象棋棋盘(纵略高)
+    if dx <= 0 or dy <= 0 or dy / dx < 0.85 or dy / dx > 1.35:
+        raise RuntimeError(
+            f"网格间距异常 (dx={dx:.1f}, dy={dy:.1f}), "
+            "截图可能包含棋盘以外的内容, 请使用干净的棋盘截图重新标定")
+    if x0 < 0 or y0 < 0 or x8 >= gray.shape[1] or y9 >= gray.shape[0]:
+        raise RuntimeError("网格超出图片边界, 请重新截取棋盘区域标定")
     # 校验: 开局所有行/列均应贴合整数网格
     for m, _ in xs:
         k = round((m - x0) / dx)
@@ -247,6 +259,12 @@ def recognize(img_path, thr=0.55, debug=False, debug_out=None):
     x0 += refine_offset(centers[:, 0], x0, dx, COLS)
     y0 += refine_offset(centers[:, 1], y0, dy, ROWS)
     print(f"[识别] 棋盘外框=({bx},{by},{bw},{bh}), 网格 x0={x0:.1f} dx={dx:.2f} y0={y0:.1f} dy={dy:.2f}")
+
+    # 标定数据失效保护: 网格必须完整落在图片内, 否则切格越界会导致模板匹配崩溃
+    if dx <= 0 or dy <= 0 or x0 < 0 or y0 < 0 \
+            or x0 + (COLS - 1) * dx > W - 1 or y0 + (ROWS - 1) * dy > H - 1:
+        raise RuntimeError(
+            "网格坐标超出截图范围, 标定数据可能已失效, 请删除 settings/calibration.json 重新标定")
 
     # 3) 逐交叉点切格 + 模板匹配
     gp = cv2.copyMakeBorder(gray, pad, pad, pad, pad, cv2.BORDER_REPLICATE)  # 边缘棋子保护

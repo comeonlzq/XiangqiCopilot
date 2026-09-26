@@ -45,6 +45,17 @@ from assistant import Assistant
 from overlay import enable_dpi_awareness
 
 
+def _set_app_icon(root):
+    """设置窗口图标(pic/logo.png), 对主窗及所有 Toplevel 生效"""
+    icon = os.path.join(BASE, "pic", "logo.png")
+    if os.path.exists(icon):
+        try:
+            root._app_icon = tk.PhotoImage(file=icon)  # 持有引用防止图片被回收
+            root.iconphoto(True, root._app_icon)
+        except tk.TclError:
+            pass
+
+
 def main():
     ap = argparse.ArgumentParser(description="天天象棋对局助手(识谱+皮卡鱼提示)")
     ap.add_argument("--engine", default=os.path.join(BASE, "pikafish.exe"),
@@ -62,6 +73,7 @@ def main():
 
     enable_dpi_awareness()
     root = tk.Tk()
+    _set_app_icon(root)
     root.withdraw()
     app = Assistant(args, root)
     try:

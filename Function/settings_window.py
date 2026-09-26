@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""设置窗口: 棋盘识别 / 常规 / 界面设置 / 引擎 / 走子 选项卡 + 设置持久化"""
+"""设置窗口: 棋盘识别 / 常规 / 界面 / 引擎 / 走子 选项卡 + 设置持久化"""
 
 import json
 import os
@@ -149,7 +149,7 @@ def take_screenshot(app):
 
 # ---------------- 设置窗口 ----------------
 def open_settings(app, tab=None):
-    """弹出设置窗口: 棋盘识别 / 常规 / 界面设置 / 引擎 / 走子 选项卡
+    """弹出设置窗口: 棋盘识别 / 常规 / 界面 / 引擎 / 走子 选项卡
     (ttk 扁平主题), tab 指定要激活的选项卡标题"""
     if app._set_win is not None and app._set_win.winfo_exists():
         app._set_win.deiconify()
@@ -231,7 +231,7 @@ def open_settings(app, tab=None):
               style="Sub.TLabel").pack(anchor="w", pady=(P(10), P(4)))
 
     # ---- 界面设置 ----
-    ui = tab_frame("界面设置")
+    ui = tab_frame("界面")
     topmost_v = tk.BooleanVar(value=app.topmost)
     show_loss_v = tk.BooleanVar(value=app.show_loss)
     hide_cap_v = tk.BooleanVar(value=app.hide_on_capture)

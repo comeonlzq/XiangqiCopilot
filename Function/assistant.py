@@ -67,6 +67,7 @@ ACCENT_HOVER = "#c33124"   # 主按钮悬停
 FIELD_HOVER = "#e3e6ea"    # 次级按钮悬停
 ICON_HOVER = "#e9ebef"     # 图标按钮悬停
 KEY = "#010203"       # 透明键色: 实现窗口圆角
+LOG_SEP = "─" * 30    # 引擎日志中两轮思考之间的分割线
 FONT = "Microsoft YaHei"
 HOTKEY_NAMES = {0x36: "右Shift", 0x2A: "左Shift", 0x42: "F8", 0x43: "F9"}
 # 棋子价值(用于损子展示排序, 大子在前)
@@ -448,11 +449,11 @@ class Assistant:
         """更新标题栏引擎状态胶囊(可从工作线程调用)"""
         self.post(lambda: self.engine_dot.config(text=text, fg=color))
 
-    def append_log(self, line):
+    def append_log(self, line, tag=None):
         """引擎日志回显(可从工作线程调用), 展示在「引擎日志」折叠卡片中"""
-        self.post(lambda: self._append_log_ui(line))
+        self.post(lambda: self._append_log_ui(line, tag))
 
-    def _append_log_ui(self, line):
+    def _append_log_ui(self, line, tag=None):
         t = getattr(self, "log_text", None)
         if t is None or not t.winfo_exists():
             return
@@ -462,7 +463,7 @@ class Assistant:
         self.log_title_var.set(f"引擎日志 ({self._log_count})")
         at_bottom = t.yview()[1] >= 0.999  # 用户未上翻才自动滚到底
         t.configure(state="normal")
-        t.insert("end", line + "\n")
+        t.insert("end", line + "\n", (tag,) if tag else ())
         excess = int(t.index("end-1c").split(".")[0]) - 300
         if excess > 0:  # 只保留最近 300 行
             t.delete("1.0", f"{excess}.0")
@@ -486,10 +487,12 @@ class Assistant:
         """引擎输出回调: 按设置转译为中文, 或原样展示(可从工作线程调用)"""
         if not self.log_translate:
             self.append_log(line)
-            return
-        txt = self._translate_engine_line(line)
-        if txt:
-            self.append_log(txt)
+        else:
+            txt = self._translate_engine_line(line)
+            if txt:
+                self.append_log(txt)
+        if line.startswith("bestmove"):  # 每轮最佳着法之后画分割线, 区分两次思考
+            self.append_log(LOG_SEP, "sep")
 
     def _pv_text(self, moves):
         """UCI 着法序列 -> 中文纵线记谱(利用思考时的局面上下文);
@@ -564,7 +567,6 @@ class Assistant:
             parts = [f"深度{d.group(1) if d else '?'}"]
             if sc:
                 parts.append(sc)
-            parts.append("主线: " + self._pv_text(pv.group(1).split()))
             return " | ".join(parts)
         return None  # 其余原始行不展示
 
@@ -635,7 +637,10 @@ class Assistant:
                                       debug=self.args.debug)
         except Exception as e:
             # 识别失败: 在面板棋盘区域提示用户
-            self.post(lambda: self.draw_board(None, warn=f"识别失败: {e}"))
+            # 注意: except 结束后 e 被清空, 而 post 的 lambda 稍后才执行,
+            # 必须先把错误信息拷贝到普通局部变量
+            msg = f"识别失败: {e}"
+            self.post(lambda: self.draw_board(None, warn=msg))
             raise
         return [[c for c in row] for row in grid], fen, path
 
@@ -1689,7 +1694,7 @@ class Assistant:
         lbar = tk.Frame(log_card.inner, bg=CARD)
         lbar.pack(fill="both", expand=True)
         self.log_text = tk.Text(
-            lbar, bg=CARD, fg=SUB, bd=0, highlightthickness=0, height=8,
+            lbar, bg=CARD, fg="#000000", bd=0, highlightthickness=0, height=8,
             wrap="word", font=(FONT, 9), state="disabled", cursor="arrow",
             padx=P(10), pady=P(8))
         lscroll = tk.Scrollbar(lbar, orient="vertical", width=P(8),
@@ -1702,6 +1707,7 @@ class Assistant:
         self.log_text.insert("1.0", "等待引擎输出...\n")
         self.log_text.tag_add("ph", "1.0", "end")
         self.log_text.tag_configure("ph", foreground=FAINT)
+        self.log_text.tag_configure("sep", foreground=FAINT)  # 分割线用弱色
         self.log_text.bind("<Button-1>", lambda e: None)  # 保留选择, 不绑拖动
         attach_toggle(sec_log, log_card, expanded=False)  # 默认折叠
 
